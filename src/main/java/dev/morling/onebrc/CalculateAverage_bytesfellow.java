@@ -15,15 +15,14 @@
  */
 package dev.morling.onebrc;
 
-import java.io.*;
-import java.nio.charset.CharsetDecoder;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiConsumer;
 
 public class CalculateAverage_bytesfellow {
 
@@ -118,7 +117,7 @@ public class CalculateAverage_bytesfellow {
                         @Override
                         public boolean offer(Runnable runnable) {
                             try {
-                                put(runnable); // block if limit was exceeded
+                                put(runnable); // preventing unlimited scheduling due to possible OOM
                             }
                             catch (InterruptedException e) {
                                 // swallow exception
@@ -134,7 +133,24 @@ public class CalculateAverage_bytesfellow {
 
         }
 
-        void processSync() {
+        public void schedule(byte[][] toProcess, int toProcessLen) {
+
+            scheduler.execute(() -> {
+                processBatch(toProcess, toProcessLen);
+            });
+
+        }
+
+        private void processBatch(byte[][] toProcess, int len) {
+
+            for (int i = 0; i < len; i++) {
+                add(toProcess[i]);
+            }
+            processQueued();
+
+        }
+
+        void processQueued() {
 
             for (int i = 0; i < newPartitions.size(); i++) {
                 newPartitions.get(i).processQueued();
@@ -285,135 +301,8 @@ public class CalculateAverage_bytesfellow {
 
         Partitioner partitioner = new Partitioner(partitionsNumber);
 
-        Path path = Paths.get(FILE);
-        long size = Files.size(path);
-
-        byte[][] buffer = new byte[PartitionCapacity][];// new String[PartitionCapacity];
-        int ptr = 0;
-
-        int bufferLen = 100000; // 16384;
-        byte[] byteArray = new byte[bufferLen]; // todo: fix to make it equals to the page size
-        int offset = 0;
-        int lenToRead = bufferLen;
-
         try (FileInputStream fileInputStream = new FileInputStream(FILE)) {
-
-            int readLen;
-
-            while ((readLen = fileInputStream.read(byteArray, offset, lenToRead)) > -1) {
-                if (readLen == 0) {
-                    continue; // todo: double check can this happen
-                }
-
-                int i = 0;
-                int nameIndexStart = 0;
-                int traverseLen = Math.min(offset + readLen, bufferLen); // fix this
-                while (i < traverseLen) {
-                    if ((byteArray[i] & 0b11111000) == 0b11110000) {
-                        // four bytes char
-                        i += 4;
-                    }
-                    else if ((byteArray[i] & 0b11110000) == 0b11100000) {
-                        // three bytes char
-                        i += 3;
-                    }
-                    else if ((byteArray[i] & 0b11100000) == 0b11000000) {
-                        // two bytes char
-                        i += 2;
-                    }
-                    else {
-
-                        // single byte char
-                        // check for the new line
-                        if (byteArray[i] == 0x0a || byteArray[i] == 0x0d) {
-
-                            /*
-                             * TODO:
-                             * - check if the new line was on the first position (empty line)
-                             * - skip \r check
-                             * if(i==0){
-                             * nameIndexStart++;
-                             * continue;
-                             * }
-                             */
-
-                            // string is in [nameIndexStart, i-1]
-                            int strBufferLen = i - nameIndexStart;
-                            var strBuffer = new byte[strBufferLen];
-                            System.arraycopy(byteArray, nameIndexStart, strBuffer, 0, strBufferLen);
-                            nameIndexStart = i + 1;
-                            // String parsedString = new String(strBuffer, StandardCharsets.UTF_8);
-
-                            buffer[ptr++] = strBuffer;// parsedString;
-
-                            if (ptr == PartitionCapacity) {
-                                handleBuffer(ptr, buffer, partitioner);
-                                ptr = 0;
-                            }
-
-                        }
-                        i++;
-                    }
-
-                }
-
-                if (nameIndexStart < traverseLen - 1) {
-                    // we have some data left in the buffer
-                    // and it wasn't terminated with the new line
-                    // copy over to the beginning and read the next portion
-                    int lengthOfRemainingBytes = traverseLen - nameIndexStart;
-                    System.arraycopy(byteArray, nameIndexStart, byteArray, 0, lengthOfRemainingBytes);
-                    offset = lengthOfRemainingBytes;
-                    lenToRead = bufferLen - lengthOfRemainingBytes;
-                }
-                else {
-                    offset = 0;
-                    lenToRead = bufferLen;
-                    nameIndexStart = 0;
-                }
-
-                /*
-                 * int nameIndexStart = 0;
-                 * for (int i = 0; i < bufferLen; i++) {
-                 * if (byteArray[i] == 0x0a) {
-                 *//*
-                    * TODO:
-                    * - check if the new line was on the first position (empty line)
-                    * - skip \r check
-                    * if(i==0){
-                    * nameIndexStart++;
-                    * continue;
-                    * }
-                    *//*
-                       *
-                       * // string is in [nameIndexStart, i-1]
-                       * int strBufferLen = i - nameIndexStart;
-                       * var strBuffer = new byte[strBufferLen];
-                       * System.arraycopy(byteArray, nameIndexStart, strBuffer, 0, strBufferLen);
-                       * String parsedString = new String(strBuffer, StandardCharsets.UTF_8);
-                       * System.out.println(parsedString);
-                       *
-                       *
-                       * }
-                       * }
-                       */
-
-                /*
-                 * int remainingBytesStart = i + 1;
-                 * if (remainingBytesStart < bufferLen) {
-                 * System.arraycopy(byteArray, remainingBytesStart, byteArray, 0, bufferLen - remainingBytesStart);
-                 * nameIndexStart = 0;
-                 * } else {
-                 * nameIndexStart = 0;
-                 * }
-                 */
-
-            }
-
-            if (ptr > 0) {
-                handleBuffer(ptr, buffer, partitioner);
-            }
-
+            parseStream(fileInputStream, 100000, (byte[][] buffer, Integer ptr) -> handleParsedLines(buffer, ptr, partitioner));
         }
         catch (Exception e) {
             throw new RuntimeException(e);
@@ -421,6 +310,100 @@ public class CalculateAverage_bytesfellow {
 
         showResultsAndWait(partitioner);
 
+    }
+
+    static void parseStream(InputStream inputStream, int bufferLen, BiConsumer<byte[][], Integer> consumer) throws IOException {
+        byte[][] buffer = new byte[PartitionCapacity][];// new String[PartitionCapacity];
+        int ptr = 0;
+
+        byte[] byteArray = new byte[bufferLen]; // todo: fix to make it equals to the page size
+        int offset = 0;
+        int lenToRead = bufferLen;
+
+        int readLen;
+
+        while ((readLen = inputStream.read(byteArray, offset, lenToRead)) > -1) {
+            if (readLen == 0) {
+                continue; // todo: double check can this happen
+            }
+
+            int i = 0;
+            int nameIndexStart = 0;
+            int traverseLen = Math.min(offset + readLen, bufferLen); // fix this
+            while (i < traverseLen) {
+                if ((byteArray[i] & 0b11111000) == 0b11110000) {
+                    // four bytes char
+                    i += 4;
+                }
+                else if ((byteArray[i] & 0b11110000) == 0b11100000) {
+                    // three bytes char
+                    i += 3;
+                }
+                else if ((byteArray[i] & 0b11100000) == 0b11000000) {
+                    // two bytes char
+                    i += 2;
+                }
+                else {
+
+                    // single byte char
+                    // check for the new line
+                    if (byteArray[i] == 0x0a || byteArray[i] == 0x0d) {
+
+                        /*
+                         * TODO:
+                         * - check if the new line was on the first position (empty line)
+                         * - skip \r check
+                         * if(i==0){
+                         * nameIndexStart++;
+                         * continue;
+                         * }
+                         */
+
+                        // string is in [nameIndexStart, i-1]
+                        int strBufferLen = i - nameIndexStart;
+                        var strBuffer = new byte[strBufferLen];
+                        System.arraycopy(byteArray, nameIndexStart, strBuffer, 0, strBufferLen);
+                        nameIndexStart = i + 1;
+                        // String parsedString = new String(strBuffer, StandardCharsets.UTF_8);
+
+                        buffer[ptr++] = strBuffer;// parsedString;
+
+                        if (ptr == PartitionCapacity) {
+                            consumer.accept(buffer, ptr);
+
+                            ptr = 0;
+                        }
+
+                    }
+                    i++;
+                }
+
+            }
+
+            if (nameIndexStart < traverseLen - 1) {
+                // we have some data left in the buffer
+                // and it wasn't terminated with the new line
+
+                if (nameIndexStart > 0) {
+                    // if the remaining part wasn't already at the beginning of the string,
+                    // then copy over to the beginning and read the next portion
+                    int lengthOfRemainingBytes = traverseLen - nameIndexStart;
+                    System.arraycopy(byteArray, nameIndexStart, byteArray, 0, lengthOfRemainingBytes);
+                    offset = lengthOfRemainingBytes;
+                    lenToRead = bufferLen - lengthOfRemainingBytes;
+                }
+            }
+            else {
+                offset = 0;
+                lenToRead = bufferLen;
+                nameIndexStart = 0;
+            }
+
+        }
+
+        if (ptr > 0) {
+            consumer.accept(buffer, ptr);
+        }
     }
 
     static void showResultsAndWait(Partitioner partitioner) {
@@ -444,22 +427,12 @@ public class CalculateAverage_bytesfellow {
 
     }
 
-    private static void handleBuffer(int toProcessLen, byte[][] buffer, Partitioner partitioner) {
+    private static void handleParsedLines(byte[][] buffer, int toProcessLen, Partitioner partitioner) {
         // String[] toProcess = new String[toProcessLen];
         byte[][] toProcess = new byte[toProcessLen][];
         System.arraycopy(buffer, 0, toProcess, 0, toProcessLen);
 
-        partitioner.scheduler.execute(() -> {
-            processBatch(partitioner, toProcess, toProcessLen);
-        });
-    }
-
-    private static void processBatch(Partitioner partitioner, byte[][] toProcess, int len) {
-
-        for (int i = 0; i < len; i++) {
-            partitioner.add(toProcess[i]);
-        }
-        partitioner.processSync();
+        partitioner.schedule(toProcess, toProcessLen);
 
     }
 
