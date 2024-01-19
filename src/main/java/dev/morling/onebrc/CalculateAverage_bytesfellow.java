@@ -24,24 +24,27 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
+import java.util.stream.Collectors;
 
 public class CalculateAverage_bytesfellow {
 
-    public static int PartitionCapacity = 10000;
+    public static int PartitionCapacity = 50000;
     private final static byte Separator = ';';
 
     static class Partition {
 
         private static AtomicInteger cntr = new AtomicInteger(-1);
         private final Map<Station, MeasurementAggregator> partitionResult = new HashMap<>();
-        private final byte[][] queue = new byte[PartitionCapacity][];// new String[PartitionCapacity];
-        private int top = 0;
+        private final byte[][] queue = new byte[PartitionCapacity][];
+        private volatile int top = 0;
 
         private final AtomicInteger leftToExecute = new AtomicInteger(0);
 
         private String name = "partition-" + cntr.incrementAndGet();
 
         int partitionExecutorQueueSize = 1000;
+
+        private final Object lock = new Object();
 
         private final Executor executor = new ThreadPoolExecutor(1, 1,
                 0L, TimeUnit.MILLISECONDS,
@@ -63,24 +66,41 @@ public class CalculateAverage_bytesfellow {
                     return t;
                 });
 
-        public int add(byte[] line) {
+        public void add(byte[] line) {
             queue[top++] = line;
-            return top;
+        }
+
+        public void addAll(List<byte[]> lines) {
+            // queue[top++] = line;
+            synchronized (lock) {
+                lines.forEach((line) -> {
+                    queue[top++] = line;
+
+                    if (top == PartitionCapacity) {
+                        processQueued();
+                    }
+                });
+            }
         }
 
         public void processQueued() {
-            leftToExecute.incrementAndGet();
+            final int currentTop;
+            final byte[][] currentQueue;
+            synchronized (lock) {
 
-            final int currentTop = top;
-            final byte[][] currentQueue = new byte[PartitionCapacity][];
-            System.arraycopy(queue, 0, currentQueue, 0, currentTop);
+                currentTop = top;
+                currentQueue = new byte[PartitionCapacity][];
+                System.arraycopy(queue, 0, currentQueue, 0, currentTop);
 
-            // clear the queue by just moving the top pointer without deleting actual data
-            top = 0;
+                // clear the queue by just moving the top pointer without deleting actual data
+                top = 0;
+            }
 
-            executor.execute(
-                    () -> {
-                        if (currentTop > 0) {
+            if (currentTop > 0) {
+                leftToExecute.incrementAndGet();
+                executor.execute(
+                        () -> {
+
                             for (int j = 0; j < currentTop; j++) {
 
                                 byte[] line = currentQueue[j];
@@ -90,9 +110,10 @@ public class CalculateAverage_bytesfellow {
                                         (k, v) -> v == null ? new MeasurementAggregator().withMeasurement(measurement) : v.withMeasurement(measurement));
 
                             }
-                        }
-                        leftToExecute.decrementAndGet();
-                    });
+                            leftToExecute.decrementAndGet();
+                        });
+            }
+
         }
 
         public void materializeNames() {
@@ -115,7 +136,9 @@ public class CalculateAverage_bytesfellow {
 
         int scheduleQueueSize = 100;
 
-        final Executor scheduler = new ThreadPoolExecutor(1, 1,
+        AtomicInteger jobsScheduled = new AtomicInteger(0);
+
+        final Executor scheduler = new ThreadPoolExecutor(5, 5,
                 0L, TimeUnit.MILLISECONDS,
                 new LinkedBlockingQueue<Runnable>(scheduleQueueSize) { // some limit to avoid OOM
                     @Override
@@ -144,18 +167,31 @@ public class CalculateAverage_bytesfellow {
 
         public void schedule(byte[][] toProcess, int toProcessLen) {
 
+            jobsScheduled.incrementAndGet();
             scheduler.execute(() -> {
                 processBatch(toProcess, toProcessLen);
+                jobsScheduled.decrementAndGet();
             });
 
         }
 
         private void processBatch(byte[][] toProcess, int len) {
 
-            for (int i = 0; i < len; i++) {
-                add(toProcess[i]);
-            }
-            processQueuedInAllPartitions();
+            Map<Integer, List<byte[]>> collect = Arrays.stream(toProcess)
+                    .map((line) -> Map.entry(getPartitionNumber(line), line))
+                    .collect(Collectors.groupingBy(Map.Entry::getKey,
+                            Collectors.mapping(Map.Entry::getValue, Collectors.toList())));
+
+            /* .parallelStream() */
+            collect.forEach((key, value) -> allPartitions.get(key).addAll(value));
+
+            /*
+             * for (int i = 0; i < len; i++) {
+             * add(toProcess[i]);
+             * }
+             */
+
+            // processQueuedInAllPartitions();
 
         }
 
@@ -163,10 +199,10 @@ public class CalculateAverage_bytesfellow {
             allPartitions.forEach(Partition::processQueued);
         }
 
-        public int add(byte[] line) {
+        public void add(byte[] line) {
             int partitionNumber = getPartitionNumber(line);
 
-            return allPartitions.get(partitionNumber).add(line);
+            allPartitions.get(partitionNumber).add(line);
         }
 
         private int getPartitionNumber(byte[] line) {
@@ -462,6 +498,11 @@ public class CalculateAverage_bytesfellow {
 
         CountDownLatch c = new CountDownLatch(1);
         partitioner.scheduler.execute(() -> {
+
+            while (partitioner.jobsScheduled.get() > 0) {
+            }
+            partitioner.processQueuedInAllPartitions();
+
             while (!partitioner.allTasksCompleted()) {
             }
             SortedMap<Station, MeasurementAggregator> result = partitioner.getAllResults();
