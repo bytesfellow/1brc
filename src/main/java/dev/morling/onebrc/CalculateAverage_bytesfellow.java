@@ -28,13 +28,15 @@ import java.util.stream.Collectors;
 
 public class CalculateAverage_bytesfellow {
 
-    public static int PartitionCapacity = 50000;
+    public static int partitionsNumber = Runtime.getRuntime().availableProcessors() > 2 ? Runtime.getRuntime().availableProcessors() - 1 : 1;
+
+    public static int PartitionCapacity = 10000;
     private final static byte Separator = ';';
 
     static class Partition {
 
         private static AtomicInteger cntr = new AtomicInteger(-1);
-        private final Map<Station, MeasurementAggregator> partitionResult = new HashMap<>();
+        private final Map<Station, MeasurementAggregator> partitionResult = new ConcurrentHashMap<>();
         private final byte[][] queue = new byte[PartitionCapacity][];
         private volatile int top = 0;
 
@@ -71,39 +73,28 @@ public class CalculateAverage_bytesfellow {
         }
 
         public void addAll(List<byte[]> lines) {
+            processQueued(lines);
             // queue[top++] = line;
-            synchronized (lock) {
-                lines.forEach((line) -> {
-                    queue[top++] = line;
-
-                    if (top == PartitionCapacity) {
-                        processQueued();
-                    }
-                });
-            }
+            /*
+             * synchronized (lock) {
+             * lines.forEach((line) -> {
+             * queue[top++] = line;
+             * 
+             * if (top == PartitionCapacity) {
+             * processQueued();
+             * }
+             * });
+             * }
+             */
         }
 
-        public void processQueued() {
-            final int currentTop;
-            final byte[][] currentQueue;
-            synchronized (lock) {
+        public void processQueued(List<byte[]> lines) {
 
-                currentTop = top;
-                currentQueue = new byte[PartitionCapacity][];
-                System.arraycopy(queue, 0, currentQueue, 0, currentTop);
-
-                // clear the queue by just moving the top pointer without deleting actual data
-                top = 0;
-            }
-
-            if (currentTop > 0) {
+            if (!lines.isEmpty()) {
                 leftToExecute.incrementAndGet();
-                executor.execute(
+                ForkJoinPool.commonPool().execute(
                         () -> {
-
-                            for (int j = 0; j < currentTop; j++) {
-
-                                byte[] line = currentQueue[j];
+                            for (byte[] line : lines) {
 
                                 Measurement measurement = getMeasurement(line);
                                 partitionResult.compute(measurement.station,
@@ -132,7 +123,7 @@ public class CalculateAverage_bytesfellow {
 
     static class Partitioner {
 
-        private final List<Partition> allPartitions = new ArrayList(PartitionCapacity);
+        private final List<Partition> allPartitions = new ArrayList();
 
         int scheduleQueueSize = 100;
 
@@ -141,6 +132,7 @@ public class CalculateAverage_bytesfellow {
         final Executor scheduler = new ThreadPoolExecutor(5, 5,
                 0L, TimeUnit.MILLISECONDS,
                 new LinkedBlockingQueue<Runnable>(scheduleQueueSize) { // some limit to avoid OOM
+
                     @Override
                     public boolean offer(Runnable runnable) {
                         try {
@@ -183,7 +175,7 @@ public class CalculateAverage_bytesfellow {
                             Collectors.mapping(Map.Entry::getValue, Collectors.toList())));
 
             /* .parallelStream() */
-            collect.forEach((key, value) -> allPartitions.get(key).addAll(value));
+            collect.entrySet().forEach((entry) -> allPartitions.get(entry.getKey()).addAll(entry.getValue()));
 
             /*
              * for (int i = 0; i < len; i++) {
@@ -196,7 +188,7 @@ public class CalculateAverage_bytesfellow {
         }
 
         void processQueuedInAllPartitions() {
-            allPartitions.forEach(Partition::processQueued);
+            // allPartitions.forEach(Partition::processQueued);
         }
 
         public void add(byte[] line) {
@@ -371,7 +363,6 @@ public class CalculateAverage_bytesfellow {
     }
 
     public static void main(String[] args) throws IOException {
-        int partitionsNumber = Runtime.getRuntime().availableProcessors() > 2 ? Runtime.getRuntime().availableProcessors() - 1 : 1;
 
         Partitioner partitioner = new Partitioner(partitionsNumber);
 
