@@ -41,9 +41,11 @@ public class CalculateAverage_bytesfellow {
 
         private String name = "partition-" + cntr.incrementAndGet();
 
+        int partitionExecutorQueueSize = 1000;
+
         private final Executor executor = new ThreadPoolExecutor(1, 1,
                 0L, TimeUnit.MILLISECONDS,
-                new LinkedBlockingQueue<Runnable>(100) { // some limit to avoid OOM
+                new LinkedBlockingQueue<Runnable>(partitionExecutorQueueSize) { // some limit to avoid OOM
                     @Override
                     public boolean offer(Runnable runnable) {
                         try {
@@ -110,32 +112,33 @@ public class CalculateAverage_bytesfellow {
     static class Partitioner {
 
         private final List<Partition> allPartitions = new ArrayList(PartitionCapacity);
-        final Executor scheduler;
+
+        int scheduleQueueSize = 100;
+
+        final Executor scheduler = new ThreadPoolExecutor(1, 1,
+                0L, TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<Runnable>(scheduleQueueSize) { // some limit to avoid OOM
+                    @Override
+                    public boolean offer(Runnable runnable) {
+                        try {
+                            put(runnable); // preventing unlimited scheduling due to possible OOM
+                        }
+                        catch (InterruptedException e) {
+                            // swallow exception
+                        }
+                        return true;
+                    }
+                }, r -> {
+                    Thread t = new Thread(r);
+                    t.setDaemon(true);
+                    t.setName("scheduler");
+                    return t;
+                });
 
         Partitioner(int partitionsNumber) {
             for (int i = 0; i < partitionsNumber; i++) {
                 allPartitions.add(new Partition());
             }
-
-            scheduler = new ThreadPoolExecutor(1, 1,
-                    0L, TimeUnit.MILLISECONDS,
-                    new LinkedBlockingQueue<Runnable>(100) { // some limit to avoid OOM
-                        @Override
-                        public boolean offer(Runnable runnable) {
-                            try {
-                                put(runnable); // preventing unlimited scheduling due to possible OOM
-                            }
-                            catch (InterruptedException e) {
-                                // swallow exception
-                            }
-                            return true;
-                        }
-                    }, r -> {
-                        Thread t = new Thread(r);
-                        t.setDaemon(true);
-                        t.setName("scheduler");
-                        return t;
-                    });
 
         }
 
@@ -180,12 +183,15 @@ public class CalculateAverage_bytesfellow {
         private static int getCode(byte[] line) {
             int utf8CharNumberOfBytes = getUtf8CharNumberOfBytes(line[0]);
 
-            long value = 0;
-            for (int i = 0; i < utf8CharNumberOfBytes; i++)
-            {
-                value += ((long) line[i] & 0xffL) << (8 * i);
-            }
-            return (int) value;
+            return line[utf8CharNumberOfBytes - 1];
+
+            /*
+             * long value = 0;
+             * for (int i = 0; i < utf8CharNumberOfBytes; i++) {
+             * value += ((long) line[i] & 0xffL) << (8 * i);
+             * }
+             * return (int) value;
+             */
         }
 
         SortedMap<Station, MeasurementAggregator> getAllResults() {
