@@ -18,6 +18,7 @@ package dev.morling.onebrc;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
@@ -32,7 +33,7 @@ public class CalculateAverage_bytesfellow {
     static class Partition {
 
         private static AtomicInteger cntr = new AtomicInteger(-1);
-        private final Map<Station, MeasurementAggregator> partition = new HashMap<>();
+        private final Map<Station, MeasurementAggregator> partitionResult = new HashMap<>();
         private final byte[][] queue = new byte[PartitionCapacity][];// new String[PartitionCapacity];
         private int top = 0;
 
@@ -47,17 +48,18 @@ public class CalculateAverage_bytesfellow {
                     public boolean offer(Runnable runnable) {
                         try {
                             put(runnable); // block if limit was exceeded
-                        } catch (InterruptedException e) {
+                        }
+                        catch (InterruptedException e) {
                             // swallow exception
                         }
                         return true;
                     }
                 }, r -> {
-            Thread t = new Thread(r);
-            t.setDaemon(true);
-            t.setName(name);
-            return t;
-        });
+                    Thread t = new Thread(r);
+                    t.setDaemon(true);
+                    t.setName(name);
+                    return t;
+                });
 
         public int add(byte[] line) {
             queue[top++] = line;
@@ -82,7 +84,7 @@ public class CalculateAverage_bytesfellow {
                                 byte[] line = currentQueue[j];
 
                                 Measurement measurement = getMeasurement(line);
-                                partition.compute(measurement.station,
+                                partitionResult.compute(measurement.station,
                                         (k, v) -> v == null ? new MeasurementAggregator().withMeasurement(measurement) : v.withMeasurement(measurement));
 
                             }
@@ -91,8 +93,12 @@ public class CalculateAverage_bytesfellow {
                     });
         }
 
+        public void materializeNames() {
+            partitionResult.keySet().forEach(Station::materializeName);
+        }
+
         public Map<Station, MeasurementAggregator> getResult() {
-            return partition;
+            return partitionResult;
         }
 
         public boolean allTasksCompleted() {
@@ -103,12 +109,12 @@ public class CalculateAverage_bytesfellow {
 
     static class Partitioner {
 
-        private final List<Partition> newPartitions = new ArrayList(PartitionCapacity);
+        private final List<Partition> allPartitions = new ArrayList(PartitionCapacity);
         final Executor scheduler;
 
         Partitioner(int partitionsNumber) {
             for (int i = 0; i < partitionsNumber; i++) {
-                newPartitions.add(new Partition());
+                allPartitions.add(new Partition());
             }
 
             scheduler = new ThreadPoolExecutor(1, 1,
@@ -118,17 +124,18 @@ public class CalculateAverage_bytesfellow {
                         public boolean offer(Runnable runnable) {
                             try {
                                 put(runnable); // preventing unlimited scheduling due to possible OOM
-                            } catch (InterruptedException e) {
+                            }
+                            catch (InterruptedException e) {
                                 // swallow exception
                             }
                             return true;
                         }
                     }, r -> {
-                Thread t = new Thread(r);
-                t.setDaemon(true);
-                t.setName("scheduler");
-                return t;
-            });
+                        Thread t = new Thread(r);
+                        t.setDaemon(true);
+                        t.setName("scheduler");
+                        return t;
+                    });
 
         }
 
@@ -150,34 +157,46 @@ public class CalculateAverage_bytesfellow {
         }
 
         void processQueuedInAllPartitions() {
-            newPartitions.parallelStream().forEach(Partition::processQueued);
+            allPartitions.forEach(Partition::processQueued);
         }
 
         public int add(byte[] line) {
             int partitionNumber = getPartitionNumber(line);
 
-            return newPartitions.get(partitionNumber).add(line);
+            return allPartitions.get(partitionNumber).add(line);
         }
 
         private int getPartitionNumber(byte[] line) {
 
-            int utf8CharNumberOfBytes = getUtf8CharNumberOfBytes(line[0]);
-            int code = 0;
-            for (int i = 0; i < utf8CharNumberOfBytes; i++) {
-                code = code * 10 + line[0];
-            }
+            int code = getCode(line);
 
-            return Math.abs(code % newPartitions.size());
+            return computePartition(code);
         }
 
-        SortedMap<Station, MeasurementAggregator> getResult() {
+        private int computePartition(int code) {
+            return Math.abs(code % allPartitions.size());
+        }
+
+        private static int getCode(byte[] line) {
+            int utf8CharNumberOfBytes = getUtf8CharNumberOfBytes(line[0]);
+
+            long value = 0;
+            for (int i = 0; i < utf8CharNumberOfBytes; i++)
+            {
+                value += ((long) line[i] & 0xffL) << (8 * i);
+            }
+            return (int) value;
+        }
+
+        SortedMap<Station, MeasurementAggregator> getAllResults() {
+            allPartitions.parallelStream().forEach(Partition::materializeNames);
             SortedMap<Station, MeasurementAggregator> result = new TreeMap<>();
-            newPartitions.forEach((p) -> result.putAll(p.getResult()));
+            allPartitions.forEach((p) -> result.putAll(p.getResult()));
             return result;
         }
 
         public boolean allTasksCompleted() {
-            return newPartitions.stream().allMatch(Partition::allTasksCompleted);
+            return allPartitions.stream().allMatch(Partition::allTasksCompleted);
         }
 
     }
@@ -217,8 +236,8 @@ public class CalculateAverage_bytesfellow {
 
         @Override
         public int compareTo(Station o) {
-            // return materializeName().compareTo(o.materializeName()); //
-            return Arrays.compare(name, o.name); // name.compareTo(o.name);
+            return materializeName().compareTo(o.materializeName()); //
+            // return Arrays.compare(name, o.name); // name.compareTo(o.name);
         }
 
         public String materializeName() {
@@ -231,7 +250,7 @@ public class CalculateAverage_bytesfellow {
 
         @Override
         public String toString() {
-            return new String(name, StandardCharsets.UTF_8);// materializeName();
+            return materializeName();
         }
     }
 
@@ -316,7 +335,8 @@ public class CalculateAverage_bytesfellow {
 
         try (FileInputStream fileInputStream = new FileInputStream(FILE)) {
             parseStream(fileInputStream, 5000000, getHandler(partitioner));
-        } catch (Exception e) {
+        }
+        catch (Exception e) {
             throw new RuntimeException(e);
         }
 
@@ -381,7 +401,8 @@ public class CalculateAverage_bytesfellow {
 
                     }
                     i++;
-                } else {
+                }
+                else {
                     i += charSizeInBytes;
                 }
 
@@ -399,7 +420,8 @@ public class CalculateAverage_bytesfellow {
                     offset = lengthOfRemainingBytes;
                     lenToRead = bufferLen - lengthOfRemainingBytes;
                 }
-            } else {
+            }
+            else {
                 offset = 0;
                 lenToRead = bufferLen;
                 nameIndexStart = 0;
@@ -416,13 +438,16 @@ public class CalculateAverage_bytesfellow {
         if ((firstByteOfChar & 0b11111000) == 0b11110000) {
             // four bytes char
             return 4;
-        } else if ((firstByteOfChar & 0b11110000) == 0b11100000) {
+        }
+        else if ((firstByteOfChar & 0b11110000) == 0b11100000) {
             // three bytes char
             return 3;
-        } else if ((firstByteOfChar & 0b11100000) == 0b11000000) {
+        }
+        else if ((firstByteOfChar & 0b11100000) == 0b11000000) {
             // two bytes char
             return 2;
-        } else {
+        }
+        else {
             return 1;
         }
     }
@@ -433,7 +458,7 @@ public class CalculateAverage_bytesfellow {
         partitioner.scheduler.execute(() -> {
             while (!partitioner.allTasksCompleted()) {
             }
-            SortedMap<Station, MeasurementAggregator> result = partitioner.getResult();
+            SortedMap<Station, MeasurementAggregator> result = partitioner.getAllResults();
 
             System.out.println(result); // output aggregated measurements according to the requirement
             c.countDown();
@@ -441,7 +466,8 @@ public class CalculateAverage_bytesfellow {
 
         try {
             c.await();
-        } catch (InterruptedException e) {
+        }
+        catch (InterruptedException e) {
             throw new RuntimeException(e);
         }
 
