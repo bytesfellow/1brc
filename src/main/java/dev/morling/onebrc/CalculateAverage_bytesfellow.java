@@ -332,7 +332,7 @@ public class CalculateAverage_bytesfellow {
         byte[][] buffer = new byte[PartitionCapacity][];// new String[PartitionCapacity];
         int ptr = 0;
 
-        byte[] byteArray = new byte[bufferLen]; // todo: fix to make it equals to the page size
+        byte[] byteArray = new byte[bufferLen];
         int offset = 0;
         int lenToRead = bufferLen;
 
@@ -340,7 +340,7 @@ public class CalculateAverage_bytesfellow {
 
         while ((readLen = inputStream.read(byteArray, offset, lenToRead)) > -1) {
             if (readLen == 0) {
-                continue; // todo: double check can this happen
+                continue;
             }
 
             int i = 0;
