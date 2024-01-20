@@ -38,7 +38,7 @@ public class CalculateAverage_bytesfellow {
     private static final int SchedulerQueueSize = Math.min(SchedulerPoolSize * 3, 12);
     private static final int PartitionsNumber = Math.max((int) (availableCpu * PartitionerCpuRatio), 1);
     private static final int PartitionExecutorQueueSize = 1000;
-    private static final int InputStreamReadBufferLen = 1000000;
+    private static final int InputStreamReadBufferLen = 250 * 4096; // near 1Mb
 
     static class Partition {
 
