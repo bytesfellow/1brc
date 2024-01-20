@@ -15,20 +15,19 @@
  */
 package dev.morling.onebrc;
 
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.io.InputStream;
+import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 public class CalculateAverage_bytesfellow {
 
-    public static int partitionsNumber = Runtime.getRuntime().availableProcessors() > 2 ? Runtime.getRuntime().availableProcessors() - 1 : 1;
+    public static int partitionsNumber = Math.max(Runtime.getRuntime().availableProcessors() / 2, 1);
 
     public static int PartitionCapacity = 10000;
     private final static byte Separator = ';';
@@ -44,7 +43,7 @@ public class CalculateAverage_bytesfellow {
 
         private String name = "partition-" + cntr.incrementAndGet();
 
-        int partitionExecutorQueueSize = 1000;
+        int partitionExecutorQueueSize = 2000;
 
         private final Object lock = new Object();
 
@@ -54,6 +53,8 @@ public class CalculateAverage_bytesfellow {
                     @Override
                     public boolean offer(Runnable runnable) {
                         try {
+                            // if (size() > partitionExecutorQueueSize)
+                            // System.out.println("Block partition");
                             put(runnable); // block if limit was exceeded
                         }
                         catch (InterruptedException e) {
@@ -79,7 +80,7 @@ public class CalculateAverage_bytesfellow {
              * synchronized (lock) {
              * lines.forEach((line) -> {
              * queue[top++] = line;
-             * 
+             *
              * if (top == PartitionCapacity) {
              * processQueued();
              * }
@@ -92,7 +93,7 @@ public class CalculateAverage_bytesfellow {
 
             if (!lines.isEmpty()) {
                 leftToExecute.incrementAndGet();
-                ForkJoinPool.commonPool().execute(
+                executor.execute(
                         () -> {
                             for (byte[] line : lines) {
 
@@ -125,17 +126,28 @@ public class CalculateAverage_bytesfellow {
 
         private final List<Partition> allPartitions = new ArrayList();
 
-        int scheduleQueueSize = 100;
+        static private int schedulePoolSize = Math.max(Runtime.getRuntime().availableProcessors() / 2, 1);
+        private int scheduleQueueSize = schedulePoolSize * 3;
 
         AtomicInteger jobsScheduled = new AtomicInteger(0);
 
-        final Executor scheduler = new ThreadPoolExecutor(5, 5,
+        final Executor scheduler = new ThreadPoolExecutor(schedulePoolSize, schedulePoolSize,
                 0L, TimeUnit.MILLISECONDS,
                 new LinkedBlockingQueue<Runnable>(scheduleQueueSize) { // some limit to avoid OOM
 
                     @Override
+                    public Runnable take() throws InterruptedException {
+                        // if(size()<schedulePoolSize )
+                        // System.out.println(">>>>>take " + size());
+                        return super.take();
+                    }
+
+                    @Override
                     public boolean offer(Runnable runnable) {
                         try {
+                            // if(size()>scheduleQueueSize )
+                            // System.out.println(">>>>>Blocking " + size());
+
                             put(runnable); // preventing unlimited scheduling due to possible OOM
                         }
                         catch (InterruptedException e) {
@@ -155,6 +167,54 @@ public class CalculateAverage_bytesfellow {
                 allPartitions.add(new Partition());
             }
 
+        }
+
+        void processSlice(byte[] slice) {
+
+            jobsScheduled.incrementAndGet();
+
+            scheduler.execute(() -> {
+                ArrayList<byte[]> lines = new ArrayList<>();
+                int start = 0;
+                int i = 0;
+                while (i < slice.length) {
+                    // if (start < i){
+
+                    int charSizeInBytes = getUtf8CharNumberOfBytes(slice[i]);
+
+                    if (charSizeInBytes == 1) {
+                        if (slice[i] == '\n' || i == (slice.length - 1)) {
+
+                            int lineLength = i - start + (i == (slice.length - 1) ? 1 : 0);
+                            byte[] line = getLine(slice, lineLength, start);
+                            start = i + 1;
+                            // System.out.println("|" + new String(line, StandardCharsets.UTF_8) + "|");
+                            lines.add(line);
+                        }
+                        i++;
+                    }
+                    else {
+                        i += charSizeInBytes;
+                    }
+                    // }
+                }
+
+                var linesBytes = new byte[lines.size()][];
+
+                // todo: do something with lines
+                lines.toArray(linesBytes);
+
+                processBatch(linesBytes, lines.size());
+
+                jobsScheduled.decrementAndGet();
+            });
+
+        }
+
+        private static byte[] getLine(byte[] slice, int lineLength, int start) {
+            byte[] line = new byte[lineLength];
+            System.arraycopy(slice, start, line, 0, lineLength);
+            return line;
         }
 
         public void schedule(byte[][] toProcess, int toProcessLen) {
@@ -367,7 +427,8 @@ public class CalculateAverage_bytesfellow {
         Partitioner partitioner = new Partitioner(partitionsNumber);
 
         try (FileInputStream fileInputStream = new FileInputStream(FILE)) {
-            parseStream(fileInputStream, 5000000, getHandler(partitioner));
+            // parseStream(fileInputStream, 50000000, getHandler(partitioner));
+            parseStreamNew(fileInputStream, 1000000, partitioner::processSlice);
         }
         catch (Exception e) {
             throw new RuntimeException(e);
@@ -379,6 +440,90 @@ public class CalculateAverage_bytesfellow {
 
     private static BiConsumer<byte[][], Integer> getHandler(Partitioner partitioner) {
         return (byte[][] buffer, Integer ptr) -> handleParsedLines(buffer, ptr, partitioner);
+    }
+
+    static void parseStreamNew(InputStream inputStream, int bufferLen, Consumer<byte[]> sliceConsumer) throws IOException {
+
+        byte[] byteArray = new byte[bufferLen];
+        int offset = 0;
+        int lenToRead = bufferLen;
+
+        int readLen;
+
+        while ((readLen = inputStream.read(byteArray, offset, lenToRead)) > -1) {
+            if (readLen == 0) {
+                continue;
+            }
+
+            int i = 0;
+            int nameIndexStart = 0;
+            int traverseLen = Math.min(offset + readLen, bufferLen); // fix this
+            int linesReadSize = traverseLen;
+
+            // splice byteArray to several parts
+            // parse each part in parallel
+            // remaining piece copy to the beginning
+            // continue reading
+
+            // find the first end of line from the end of the buffer
+
+            for (int j = traverseLen - 1; j >= 0; j--) {
+
+                if (byteArray[j] == '\n') {
+                    linesReadSize = j + 1;
+                    break;
+                }
+
+            }
+
+            if (linesReadSize == traverseLen) {
+                // todo: end of line was not found
+                // error
+            }
+
+            int numSlices = Partitioner.schedulePoolSize;
+            int sliceSize = linesReadSize / numSlices;
+            // System.out.println("linesReadSize="+ linesReadSize+ " sliceSize=" +sliceSize );
+
+            int sliceStart = 0;
+            int sliceEnd = sliceStart + sliceSize;
+
+            ArrayList<byte[]> slices = new ArrayList<>();
+
+            int s = 0, len = -1;
+            int j = Math.min(sliceSize, linesReadSize - 1);
+
+            while (s < linesReadSize && j < linesReadSize) {
+                if (byteArray[j] == '\n') {
+                    len = j - s;
+                    byte[] slice = new byte[len];
+                    System.arraycopy(byteArray, s, slice, 0, len);
+                    slices.add(slice);
+                    sliceConsumer.accept(slice);
+
+                    s = j + 1;
+                    j = Math.min(s + sliceSize, linesReadSize - 1);
+
+                }
+                else {
+                    j++;
+                }
+            }
+
+            if (s < traverseLen && linesReadSize < traverseLen) {
+                len = traverseLen - s;
+                System.arraycopy(byteArray, s, byteArray, 0, len);
+                offset = len;
+                lenToRead = bufferLen - len;
+            }
+            else {
+                offset = 0;
+                lenToRead = bufferLen;
+            }
+
+            // slices.forEach((slice) -> sliceConsumer.accept(slice));
+
+        }
     }
 
     static void parseStream(InputStream inputStream, int bufferLen, BiConsumer<byte[][], Integer> consumer) throws IOException {
