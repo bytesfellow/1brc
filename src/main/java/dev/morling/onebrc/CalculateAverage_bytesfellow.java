@@ -16,34 +16,44 @@
 package dev.morling.onebrc;
 
 import java.io.*;
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.BiConsumer;
 import java.util.function.Consumer;
-import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 public class CalculateAverage_bytesfellow {
 
-    public static int partitionsNumber = Math.max(Runtime.getRuntime().availableProcessors() / 2, 1);
+    // 1Mb
+    // executor: 1Mb
+    // executor queue: 10 * 1Mb
+    //
+    // partitions: 1Mb
+    // partitions queue: 6 * 100 * 1Mb
+    //
+    //
 
-    public static int PartitionCapacity = 10000;
-    private final static byte Separator = ';';
+    private static final int bufferLen = 1000000;
+    private static final byte Separator = ';';
+
+    private static final double SchedulerCpuRatio = 0.3;
+    private static final double PartitionedCpuRatio = 0.7;
+
+    private static final int SchedulerPoolSize = Math.max((int) (Runtime.getRuntime().availableProcessors() * SchedulerCpuRatio), 1);
+    private static final int SchedulerQueueSize = Math.min(SchedulerPoolSize * 3, 10);
+    private static final int PartitionsNumber = Math.max((int) (Runtime.getRuntime().availableProcessors() * PartitionedCpuRatio), 1);
+    private static final int partitionExecutorQueueSize = 1000;
+
+    ;
 
     static class Partition {
 
         private static AtomicInteger cntr = new AtomicInteger(-1);
-        private final Map<Station, MeasurementAggregator> partitionResult = new ConcurrentHashMap<>();
-        private final byte[][] queue = new byte[PartitionCapacity][];
-        private volatile int top = 0;
-
+        private final Map<Station, MeasurementAggregator> partitionResult = new HashMap<>();
         private final AtomicInteger leftToExecute = new AtomicInteger(0);
 
         private String name = "partition-" + cntr.incrementAndGet();
-
-        int partitionExecutorQueueSize = 2000;
 
         private final Object lock = new Object();
 
@@ -69,27 +79,7 @@ public class CalculateAverage_bytesfellow {
                     return t;
                 });
 
-        public void add(byte[] line) {
-            queue[top++] = line;
-        }
-
-        public void addAll(List<byte[]> lines) {
-            processQueued(lines);
-            // queue[top++] = line;
-            /*
-             * synchronized (lock) {
-             * lines.forEach((line) -> {
-             * queue[top++] = line;
-             *
-             * if (top == PartitionCapacity) {
-             * processQueued();
-             * }
-             * });
-             * }
-             */
-        }
-
-        public void processQueued(List<byte[]> lines) {
+        public void scheduleToProcess(List<byte[]> lines) {
 
             if (!lines.isEmpty()) {
                 leftToExecute.incrementAndGet();
@@ -126,14 +116,11 @@ public class CalculateAverage_bytesfellow {
 
         private final List<Partition> allPartitions = new ArrayList();
 
-        static private int schedulePoolSize = Math.max(Runtime.getRuntime().availableProcessors() / 2, 1);
-        private int scheduleQueueSize = schedulePoolSize * 3;
-
         AtomicInteger jobsScheduled = new AtomicInteger(0);
 
-        final Executor scheduler = new ThreadPoolExecutor(schedulePoolSize, schedulePoolSize,
+        final Executor scheduler = new ThreadPoolExecutor(SchedulerPoolSize, SchedulerPoolSize,
                 0L, TimeUnit.MILLISECONDS,
-                new LinkedBlockingQueue<Runnable>(scheduleQueueSize) { // some limit to avoid OOM
+                new LinkedBlockingQueue<Runnable>(SchedulerQueueSize) { // some limit to avoid OOM
 
                     @Override
                     public Runnable take() throws InterruptedException {
@@ -163,10 +150,11 @@ public class CalculateAverage_bytesfellow {
                 });
 
         Partitioner(int partitionsNumber) {
-            for (int i = 0; i < partitionsNumber; i++) {
-                allPartitions.add(new Partition());
-            }
+            IntStream.range(0, partitionsNumber).forEach((i) -> allPartitions.add(new Partition()));
+        }
 
+        private int partitionsSize() {
+            return allPartitions.size();
         }
 
         void processSlice(byte[] slice) {
@@ -174,37 +162,30 @@ public class CalculateAverage_bytesfellow {
             jobsScheduled.incrementAndGet();
 
             scheduler.execute(() -> {
-                ArrayList<byte[]> lines = new ArrayList<>();
+
+                List<List<byte[]>> partitionedLines = new ArrayList<>(partitionsSize());
+                IntStream.range(0, partitionsSize()).forEach((p) -> partitionedLines.add(new ArrayList<>()));
+
+                // ArrayList<byte[]> lines = new ArrayList<>();
                 int start = 0;
                 int i = 0;
                 while (i < slice.length) {
-                    // if (start < i){
 
-                    int charSizeInBytes = getUtf8CharNumberOfBytes(slice[i]);
+                    if (slice[i] == '\n' || i == (slice.length - 1)) {
 
-                    if (charSizeInBytes == 1) {
-                        if (slice[i] == '\n' || i == (slice.length - 1)) {
+                        int lineLength = i - start + (i == (slice.length - 1) ? 1 : 0);
+                        byte[] line = getLine(slice, lineLength, start);
+                        start = i + 1;
 
-                            int lineLength = i - start + (i == (slice.length - 1) ? 1 : 0);
-                            byte[] line = getLine(slice, lineLength, start);
-                            start = i + 1;
-                            // System.out.println("|" + new String(line, StandardCharsets.UTF_8) + "|");
-                            lines.add(line);
-                        }
-                        i++;
+                        int partition = getPartitionNumber(line);
+                        partitionedLines.get(partition).add(line);
                     }
-                    else {
-                        i += charSizeInBytes;
-                    }
-                    // }
+
+                    i += getUtf8CharNumberOfBytes(slice[i]);
+
                 }
 
-                var linesBytes = new byte[lines.size()][];
-
-                // todo: do something with lines
-                lines.toArray(linesBytes);
-
-                processBatch(linesBytes, lines.size());
+                processPartitionedBatch(partitionedLines);
 
                 jobsScheduled.decrementAndGet();
             });
@@ -217,49 +198,15 @@ public class CalculateAverage_bytesfellow {
             return line;
         }
 
-        public void schedule(byte[][] toProcess, int toProcessLen) {
-
-            jobsScheduled.incrementAndGet();
-            scheduler.execute(() -> {
-                processBatch(toProcess, toProcessLen);
-                jobsScheduled.decrementAndGet();
-            });
-
-        }
-
-        private void processBatch(byte[][] toProcess, int len) {
-
-            Map<Integer, List<byte[]>> collect = Arrays.stream(toProcess)
-                    .map((line) -> Map.entry(getPartitionNumber(line), line))
-                    .collect(Collectors.groupingBy(Map.Entry::getKey,
-                            Collectors.mapping(Map.Entry::getValue, Collectors.toList())));
-
-            /* .parallelStream() */
-            collect.entrySet().forEach((entry) -> allPartitions.get(entry.getKey()).addAll(entry.getValue()));
-
-            /*
-             * for (int i = 0; i < len; i++) {
-             * add(toProcess[i]);
-             * }
-             */
-
-            // processQueuedInAllPartitions();
-
-        }
-
-        void processQueuedInAllPartitions() {
-            // allPartitions.forEach(Partition::processQueued);
-        }
-
-        public void add(byte[] line) {
-            int partitionNumber = getPartitionNumber(line);
-
-            allPartitions.get(partitionNumber).add(line);
+        private void processPartitionedBatch(List<List<byte[]>> partitionedLines) {
+            for (int i = 0; i < partitionedLines.size(); i++) {
+                allPartitions.get(i).scheduleToProcess(partitionedLines.get(i));
+            }
         }
 
         private int getPartitionNumber(byte[] line) {
 
-            int code = getCode(line);
+            int code = getCodeForPatition(line);
 
             return computePartition(code);
         }
@@ -268,10 +215,10 @@ public class CalculateAverage_bytesfellow {
             return Math.abs(code % allPartitions.size());
         }
 
-        private static int getCode(byte[] line) {
+        private static int getCodeForPatition(byte[] line) {
             int utf8CharNumberOfBytes = getUtf8CharNumberOfBytes(line[0]);
 
-            return line[utf8CharNumberOfBytes - 1];
+            return line[utf8CharNumberOfBytes - 1] + (utf8CharNumberOfBytes > 1 ? line[utf8CharNumberOfBytes - 2] : (byte) 0);
 
             /*
              * long value = 0;
@@ -424,11 +371,10 @@ public class CalculateAverage_bytesfellow {
 
     public static void main(String[] args) throws IOException {
 
-        Partitioner partitioner = new Partitioner(partitionsNumber);
+        Partitioner partitioner = new Partitioner(PartitionsNumber);
 
         try (FileInputStream fileInputStream = new FileInputStream(FILE)) {
-            // parseStream(fileInputStream, 50000000, getHandler(partitioner));
-            parseStreamNew(fileInputStream, 1000000, partitioner::processSlice);
+            parseStreamNew(fileInputStream, bufferLen, partitioner::processSlice);
         }
         catch (Exception e) {
             throw new RuntimeException(e);
@@ -436,10 +382,6 @@ public class CalculateAverage_bytesfellow {
 
         showResultsAndWait(partitioner);
 
-    }
-
-    private static BiConsumer<byte[][], Integer> getHandler(Partitioner partitioner) {
-        return (byte[][] buffer, Integer ptr) -> handleParsedLines(buffer, ptr, partitioner);
     }
 
     static void parseStreamNew(InputStream inputStream, int bufferLen, Consumer<byte[]> sliceConsumer) throws IOException {
@@ -481,7 +423,7 @@ public class CalculateAverage_bytesfellow {
                 // error
             }
 
-            int numSlices = Partitioner.schedulePoolSize;
+            int numSlices = SchedulerPoolSize;
             int sliceSize = linesReadSize / numSlices;
             // System.out.println("linesReadSize="+ linesReadSize+ " sliceSize=" +sliceSize );
 
@@ -526,92 +468,6 @@ public class CalculateAverage_bytesfellow {
         }
     }
 
-    static void parseStream(InputStream inputStream, int bufferLen, BiConsumer<byte[][], Integer> consumer) throws IOException {
-        byte[][] buffer = new byte[PartitionCapacity][];// new String[PartitionCapacity];
-        int ptr = 0;
-
-        byte[] byteArray = new byte[bufferLen];
-        int offset = 0;
-        int lenToRead = bufferLen;
-
-        int readLen;
-
-        while ((readLen = inputStream.read(byteArray, offset, lenToRead)) > -1) {
-            if (readLen == 0) {
-                continue;
-            }
-
-            int i = 0;
-            int nameIndexStart = 0;
-            int traverseLen = Math.min(offset + readLen, bufferLen); // fix this
-            while (i < traverseLen) {
-                int charSizeInBytes = getUtf8CharNumberOfBytes(byteArray[i]);
-
-                if (charSizeInBytes == 1) {
-                    // single byte char
-                    // check for the new line
-                    if (byteArray[i] == 0x0a || byteArray[i] == 0x0d) {
-
-                        /*
-                         * TODO:
-                         * - check if the new line was on the first position (empty line)
-                         * - skip \r check
-                         * if(i==0){
-                         * nameIndexStart++;
-                         * continue;
-                         * }
-                         */
-
-                        // string is in [nameIndexStart, i-1]
-                        int strBufferLen = i - nameIndexStart;
-                        var strBuffer = new byte[strBufferLen];
-                        System.arraycopy(byteArray, nameIndexStart, strBuffer, 0, strBufferLen);
-                        nameIndexStart = i + 1;
-                        // String parsedString = new String(strBuffer, StandardCharsets.UTF_8);
-
-                        buffer[ptr++] = strBuffer;// parsedString;
-
-                        if (ptr == PartitionCapacity) {
-                            consumer.accept(buffer, ptr);
-
-                            ptr = 0;
-                        }
-
-                    }
-                    i++;
-                }
-                else {
-                    i += charSizeInBytes;
-                }
-
-            }
-
-            if (nameIndexStart < traverseLen - 1) {
-                // we have some data left in the buffer
-                // and it wasn't terminated with the new line
-
-                if (nameIndexStart > 0) {
-                    // if the remaining part wasn't already at the beginning of the string,
-                    // then copy over to the beginning and read the next portion
-                    int lengthOfRemainingBytes = traverseLen - nameIndexStart;
-                    System.arraycopy(byteArray, nameIndexStart, byteArray, 0, lengthOfRemainingBytes);
-                    offset = lengthOfRemainingBytes;
-                    lenToRead = bufferLen - lengthOfRemainingBytes;
-                }
-            }
-            else {
-                offset = 0;
-                lenToRead = bufferLen;
-                nameIndexStart = 0;
-            }
-
-        }
-
-        if (ptr > 0) {
-            consumer.accept(buffer, ptr);
-        }
-    }
-
     static int getUtf8CharNumberOfBytes(byte firstByteOfChar) {
         if ((firstByteOfChar & 0b11111000) == 0b11110000) {
             // four bytes char
@@ -637,7 +493,6 @@ public class CalculateAverage_bytesfellow {
 
             while (partitioner.jobsScheduled.get() > 0) {
             }
-            partitioner.processQueuedInAllPartitions();
 
             while (!partitioner.allTasksCompleted()) {
             }
@@ -653,15 +508,6 @@ public class CalculateAverage_bytesfellow {
         catch (InterruptedException e) {
             throw new RuntimeException(e);
         }
-
-    }
-
-    private static void handleParsedLines(byte[][] buffer, int toProcessLen, Partitioner partitioner) {
-        // String[] toProcess = new String[toProcessLen];
-        byte[][] toProcess = new byte[toProcessLen][];
-        System.arraycopy(buffer, 0, toProcess, 0, toProcessLen);
-
-        partitioner.schedule(toProcess, toProcessLen);
 
     }
 
