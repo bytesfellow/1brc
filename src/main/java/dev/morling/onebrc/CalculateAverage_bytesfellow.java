@@ -55,18 +55,17 @@ public class CalculateAverage_bytesfellow {
                     public boolean offer(Runnable runnable) {
                         try {
                             put(runnable); // block if limit was exceeded
-                        }
-                        catch (InterruptedException e) {
+                        } catch (InterruptedException e) {
                             throw new RuntimeException(e);
                         }
                         return true;
                     }
                 }, r -> {
-                    Thread t = new Thread(r);
-                    t.setDaemon(true);
-                    t.setName(name);
-                    return t;
-                });
+            Thread t = new Thread(r);
+            t.setDaemon(true);
+            t.setName(name);
+            return t;
+        });
 
         public void scheduleToProcess(List<byte[]> lines) {
 
@@ -82,8 +81,7 @@ public class CalculateAverage_bytesfellow {
                                 MeasurementAggregator measurementAggregator = partitionResult.get(measurement.station);
                                 if (measurementAggregator == null) {
                                     partitionResult.put(measurement.station, new MeasurementAggregator().withMeasurement(measurement));
-                                }
-                                else {
+                                } else {
                                     measurementAggregator.withMeasurement(measurement);
                                 }
                                 // partitionResult.compute(measurement.station,
@@ -130,18 +128,17 @@ public class CalculateAverage_bytesfellow {
                     public boolean offer(Runnable runnable) {
                         try {
                             put(runnable); // preventing unlimited scheduling due to possible OOM
-                        }
-                        catch (InterruptedException e) {
+                        } catch (InterruptedException e) {
                             throw new RuntimeException(e);
                         }
                         return true;
                     }
                 }, r -> {
-                    Thread t = new Thread(r);
-                    t.setDaemon(true);
-                    t.setName("scheduler");
-                    return t;
-                });
+            Thread t = new Thread(r);
+            t.setDaemon(true);
+            t.setName("scheduler");
+            return t;
+        });
 
         Partitioner(int partitionsSize) {
             IntStream.range(0, partitionsSize).forEach((i) -> allPartitions.add(new Partition()));
@@ -229,19 +226,21 @@ public class CalculateAverage_bytesfellow {
         private final byte[] name;
         private final int hash;
 
+        private final int len;
+
         private volatile String nameAsString;
 
-        public Station(byte[] inputLine, int len) {
-            this.name = new byte[len];
-            System.arraycopy(inputLine, 0, name, 0, len);
-            this.hash = hashCode109(name);
+        public Station(byte[] inputLine, int lenOfStationInInputLine) {
+            this.name = inputLine;
+            this.len = lenOfStationInInputLine;
+            this.hash = hashCode109(name, lenOfStationInInputLine);
         }
 
-        int hashCode109(byte[] value) {
-            if (value.length == 0)
+        int hashCode109(byte[] value, int len) {
+            if (len == 0 || value.length == 0)
                 return 0;
             int h = value[0];
-            for (int i = 1; i < value.length; i++) {
+            for (int i = 1; i < len; i++) {
                 h = h * 109 + value[i];
             }
             h *= 109;
@@ -256,10 +255,10 @@ public class CalculateAverage_bytesfellow {
                 return false;
 
             Station station = (Station) o;
-            if (name.length != station.name.length) {
+            if (len != station.len) {
                 return false;
             }
-            for (int i = 0; i < name.length; i++) {
+            for (int i = 0; i < len; i++) {
                 if (name[i] != station.name[i]) {
                     return false;
                 }
@@ -270,7 +269,6 @@ public class CalculateAverage_bytesfellow {
 
         @Override
         public int hashCode() {
-
             return hash;
         }
 
@@ -282,7 +280,9 @@ public class CalculateAverage_bytesfellow {
 
         public String materializeName() {
             if (nameAsString == null) {
-                nameAsString = new String(name, StandardCharsets.UTF_8);
+                byte[] nameForMaterialization = new byte[len];
+                System.arraycopy(name, 0, nameForMaterialization, 0, len);
+                nameAsString = new String(nameForMaterialization, StandardCharsets.UTF_8);
             }
 
             return nameAsString;
@@ -357,12 +357,12 @@ public class CalculateAverage_bytesfellow {
             if (i > 0) {
                 value = (value << 3) + (value << 1); // *= 10;
             }
-            value += asLong(lineWithDigits, i);
+            value += digitAsLong(lineWithDigits, i);
         }
         return start > startIndex ? -value : value;
     }
 
-    private static long asLong(byte[] digits, int position) {
+    private static long digitAsLong(byte[] digits, int position) {
         return (digits[position] - 48);
     }
 
@@ -372,8 +372,7 @@ public class CalculateAverage_bytesfellow {
 
         try (FileInputStream fileInputStream = new FileInputStream(FILE)) {
             parseStreamWithBytes(fileInputStream, InputStreamReadBufferLen, partitioner::processSlice);
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             throw new RuntimeException(e);
         }
 
@@ -423,8 +422,7 @@ public class CalculateAverage_bytesfellow {
                     s = j + 1;
                     j = Math.min(s + sliceSize, lastLineBreakInSlicePosition - 1);
 
-                }
-                else {
+                } else {
                     j++;
                 }
             }
@@ -435,8 +433,7 @@ public class CalculateAverage_bytesfellow {
                 System.arraycopy(byteArray, s, byteArray, 0, len);
                 offset = len;
                 lenToRead = bufferLen - len;
-            }
-            else {
+            } else {
                 offset = 0;
                 lenToRead = bufferLen;
             }
@@ -447,16 +444,13 @@ public class CalculateAverage_bytesfellow {
         if ((firstByteOfChar & 0b11111000) == 0b11110000) {
             // four bytes char
             return 4;
-        }
-        else if ((firstByteOfChar & 0b11110000) == 0b11100000) {
+        } else if ((firstByteOfChar & 0b11110000) == 0b11100000) {
             // three bytes char
             return 3;
-        }
-        else if ((firstByteOfChar & 0b11100000) == 0b11000000) {
+        } else if ((firstByteOfChar & 0b11100000) == 0b11000000) {
             // two bytes char
             return 2;
-        }
-        else {
+        } else {
             return 1;
         }
     }
@@ -481,8 +475,7 @@ public class CalculateAverage_bytesfellow {
 
         try {
             c.await();
-        }
-        catch (InterruptedException e) {
+        } catch (InterruptedException e) {
             throw new RuntimeException(e);
         }
 
