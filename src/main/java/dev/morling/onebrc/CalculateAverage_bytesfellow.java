@@ -258,6 +258,7 @@ public class CalculateAverage_bytesfellow {
                 return false;
 
             Station station = (Station) o;
+
             if (len != station.len) {
                 return false;
             }
