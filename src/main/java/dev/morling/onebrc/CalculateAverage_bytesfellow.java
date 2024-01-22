@@ -29,8 +29,8 @@ public class CalculateAverage_bytesfellow {
 
     private static final byte Separator = ';';
 
-    private static final double SchedulerCpuRatio = 0.3;
-    private static final double PartitionerCpuRatio = 0.7;
+    private static final double SchedulerCpuRatio = 0.5;
+    private static final double PartitionerCpuRatio = 0.5;
 
     private static final int availableCpu = Runtime.getRuntime().availableProcessors();
 
@@ -86,9 +86,6 @@ public class CalculateAverage_bytesfellow {
                                 else {
                                     measurementAggregator.withMeasurement(measurement);
                                 }
-                                // partitionResult.compute(measurement.station,
-                                // (k, v) -> v == null ? new MeasurementAggregator().withMeasurement(measurement) : v.withMeasurement(measurement));
-
                             }
                             leftToExecute.decrementAndGet();
                         });
@@ -159,7 +156,7 @@ public class CalculateAverage_bytesfellow {
             scheduler.execute(() -> {
 
                 List<List<byte[]>> partitionedLines = new ArrayList<>(partitionsSize());
-                IntStream.range(0, partitionsSize()).forEach((p) -> partitionedLines.add(new ArrayList<>()));
+                IntStream.range(0, partitionsSize()).forEach((p) -> partitionedLines.add(new ArrayList<>(slice.length / 116 / 2))); // 116 is the max line len incl new line char
 
                 int start = 0;
                 int i = 0;
@@ -448,21 +445,13 @@ public class CalculateAverage_bytesfellow {
     }
 
     static int getUtf8CharNumberOfBytes(byte firstByteOfChar) {
-        if ((firstByteOfChar & 0b11111000) == 0b11110000) {
-            // four bytes char
-            return 4;
-        }
-        else if ((firstByteOfChar & 0b11110000) == 0b11100000) {
-            // three bytes char
-            return 3;
-        }
-        else if ((firstByteOfChar & 0b11100000) == 0b11000000) {
-            // two bytes char
-            return 2;
-        }
-        else {
-            return 1;
-        }
+        int masked = firstByteOfChar & 0b11111000;
+        return switch (masked) {
+            case 0b11110000 -> 4;
+            case 0b11100000 -> 3;
+            case 0b11000000 -> 2;
+            default -> 1;
+        };
     }
 
     static void showResults(Partitioner partitioner) {
@@ -494,9 +483,7 @@ public class CalculateAverage_bytesfellow {
 
     private static Measurement getMeasurement(byte[] line) {
         int idx = lastIndexOfSeparator(line);
-        long temperature = parseToLongIgnoringDecimalPoint(line, idx + 1);
-
-        return new Measurement(new Station(line, idx), temperature);
+        return new Measurement(new Station(line, idx), parseToLongIgnoringDecimalPoint(line, idx + 1));
     }
 
     private static int lastIndexOfSeparator(byte[] line) {
