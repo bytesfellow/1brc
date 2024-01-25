@@ -18,7 +18,13 @@ package dev.morling.onebrc;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.LongBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -41,7 +47,7 @@ public class CalculateAverage_bytesfellow {
     private static final int PartitionExecutorQueueSize = 1000;
 
     private static final int InputStreamBlockSize = 4096;
-    private static final int InputStreamReadBufferLen = 250 * InputStreamBlockSize;
+    private static final int InputStreamReadBufferLen = 100 * InputStreamBlockSize;
 
     static class Partition {
 
@@ -58,20 +64,19 @@ public class CalculateAverage_bytesfellow {
                     public boolean offer(Runnable runnable) {
                         try {
                             put(runnable); // block if limit was exceeded
-                        }
-                        catch (InterruptedException e) {
+                        } catch (InterruptedException e) {
                             throw new RuntimeException(e);
                         }
                         return true;
                     }
                 }, r -> {
-                    Thread t = new Thread(r);
-                    t.setDaemon(true);
-                    t.setName(name);
-                    return t;
-                });
+            Thread t = new Thread(r);
+            t.setDaemon(true);
+            t.setName(name);
+            return t;
+        });
 
-        public void scheduleToProcess(byte[] slice, List<LineParams> lines) {
+        public void scheduleToProcess(ByteBuffer slice, List<LineParams> lines) {
 
             if (!lines.isEmpty()) {
                 leftToExecute.incrementAndGet();
@@ -85,8 +90,7 @@ public class CalculateAverage_bytesfellow {
                                 MeasurementAggregator measurementAggregator = partitionResult.get(measurement.station);
                                 if (measurementAggregator == null) {
                                     partitionResult.put(new Station(measurement.station), new MeasurementAggregator().withMeasurement(measurement));
-                                }
-                                else {
+                                } else {
                                     measurementAggregator.withMeasurement(measurement);
                                 }
                             }
@@ -134,18 +138,17 @@ public class CalculateAverage_bytesfellow {
                     public boolean offer(Runnable runnable) {
                         try {
                             put(runnable); // preventing unlimited scheduling due to possible OOM
-                        }
-                        catch (InterruptedException e) {
+                        } catch (InterruptedException e) {
                             throw new RuntimeException(e);
                         }
                         return true;
                     }
                 }, r -> {
-                    Thread t = new Thread(r);
-                    t.setDaemon(true);
-                    t.setName("scheduler");
-                    return t;
-                });
+            Thread t = new Thread(r);
+            t.setDaemon(true);
+            t.setName("scheduler");
+            return t;
+        });
 
         Partitioner(int partitionsSize) {
             IntStream.range(0, partitionsSize).forEach((i) -> allPartitions.add(new Partition()));
@@ -156,25 +159,25 @@ public class CalculateAverage_bytesfellow {
             return partitionsSize;
         }
 
-        void processSlice(byte[] slice) {
+        void processSlice(ByteBuffer slice) {
 
             jobsScheduled.incrementAndGet();
 
             scheduler.execute(() -> {
                 List<List<LineParams>> partitionedLines = new ArrayList<>(partitionsSize());
-                IntStream.range(0, partitionsSize()).forEach((p) -> partitionedLines.add(new ArrayList<>(slice.length / 116 / 2))); // 116 is the max line len incl new line char
+                IntStream.range(0, partitionsSize()).forEach((p) -> partitionedLines.add(new ArrayList<>(slice.limit() / 116 / 2))); // 116 is the max line len incl new line char
 
                 int start = 0;
                 int i = 0;
                 int startCharLen = 0;
-                while (i < slice.length) {
+                while (i < slice.limit()) {
 
-                    if (slice[i] == '\n' || i == (slice.length - 1)) {
+                    if (slice.get(i) == '\n' || i == (slice.limit() - 1)) {
 
-                        int lineLength = i - start + (i == (slice.length - 1) ? 1 : 0);
+                        int lineLength = i - start;
                         LineParams lineParams = new LineParams(start, lineLength);
 
-                        int partitioningCode = getPartitioningCode(slice, start, getUtf8CharNumberOfBytes(slice[start]));
+                        int partitioningCode = getPartitioningCode(slice, start, getUtf8CharNumberOfBytes(slice.get(start)));
                         int partition = computePartition(partitioningCode);
 
                         partitionedLines.get(partition).add(lineParams);
@@ -192,13 +195,7 @@ public class CalculateAverage_bytesfellow {
 
         }
 
-        private static byte[] getLine(byte[] slice, int lineLength, int start) {
-            byte[] line = new byte[lineLength];
-            System.arraycopy(slice, start, line, 0, lineLength);
-            return line;
-        }
-
-        private void processPartitionedBatch(byte[] slice, List<List<LineParams>> partitionedLines) {
+        private void processPartitionedBatch(ByteBuffer slice, List<List<LineParams>> partitionedLines) {
             for (int i = 0; i < partitionedLines.size(); i++) {
                 allPartitions.get(i).scheduleToProcess(slice, partitionedLines.get(i));
             }
@@ -208,19 +205,16 @@ public class CalculateAverage_bytesfellow {
             return Math.abs(code % partitionsSize());
         }
 
-        private static int getPartitioningCode(byte[] line, int start, int utf8CharNumberOfBytes) {
+        private static int getPartitioningCode(ByteBuffer line, int start, int utf8CharNumberOfBytes) {
             // seems good enough
             if (utf8CharNumberOfBytes == 4) {
-                return line[start] + line[start + 1] + line[start + 2] + line[start + 3];
-            }
-            else if (utf8CharNumberOfBytes == 3) {
-                return line[start] + line[start + 1] + line[start + 2];
-            }
-            else if (utf8CharNumberOfBytes == 2) {
-                return line[start] + line[start + 1];
-            }
-            else {
-                return line[start];
+                return line.get(start) + line.get(start + 1) + line.get(start + 2) + line.get(start + 3);
+            } else if (utf8CharNumberOfBytes == 3) {
+                return line.get(start) + line.get(start + 1) + line.get(start + 2);
+            } else if (utf8CharNumberOfBytes == 2) {
+                return line.get(start) + line.get(start + 1);
+            } else {
+                return line.get(start);
             }
         }
 
@@ -237,39 +231,112 @@ public class CalculateAverage_bytesfellow {
 
     }
 
+    class UnsafeMap<K, V> implements Map<K, V> {
+
+        @Override
+        public int size() {
+            return 0;
+        }
+
+        @Override
+        public boolean isEmpty() {
+            return false;
+        }
+
+        @Override
+        public boolean containsKey(Object key) {
+            return false;
+        }
+
+        @Override
+        public boolean containsValue(Object value) {
+            return false;
+        }
+
+        @Override
+        public V get(Object key) {
+            return null;
+        }
+
+        @Override
+        public V put(K key, V value) {
+            return null;
+        }
+
+        @Override
+        public V remove(Object key) {
+            return null;
+        }
+
+        @Override
+        public void putAll(Map<? extends K, ? extends V> m) {
+
+        }
+
+        @Override
+        public void clear() {
+
+        }
+
+        @Override
+        public Set<K> keySet() {
+            return null;
+        }
+
+        @Override
+        public Collection<V> values() {
+            return null;
+        }
+
+        @Override
+        public Set<Entry<K, V>> entrySet() {
+            return null;
+        }
+    }
+
     private static final String FILE = "./measurements.txt";
 
     public static class Station implements Comparable<Station> {
 
-        private final byte[] inputSlice;
+        private final ByteBuffer inputSlice;
         private final int hash;
 
         private final int startIdx;
         private final int len;
 
         private volatile String nameAsString;
+        // private long[] compactedString;
 
-        public Station(byte[] inputSlice, int startIdx, int len) {
+        private boolean dontSLice = false;
+
+        public Station(ByteBuffer inputSlice, int startIdx, int len) {
             this.inputSlice = inputSlice;
             this.startIdx = startIdx;
             this.len = len;
+
             this.hash = hashcodeFast();
+
         }
 
         public Station(Station from) {
-            this.inputSlice = new byte[from.len];
-            System.arraycopy(from.inputSlice, from.startIdx, this.inputSlice, 0, from.len);
+            byte[] str = new byte[from.len];
+            from.inputSlice.get(from.startIdx, str, 0, from.len);
+            this.inputSlice = ByteBuffer.wrap(str);
+
             this.startIdx = 0;
             this.len = from.len;
+
             this.hash = from.hash;
+            this.dontSLice = true;
+            // this.compactedString = from.compactedString;
         }
 
         private int hashCode109() {
             if (len == 0)
                 return 0;
-            int h = inputSlice[startIdx];
+            int h = inputSlice.get(startIdx);
             for (int i = startIdx + 1; i < startIdx + len; i++) {
-                h = (h << 7) + inputSlice[i];
+                h = (h << 7) + inputSlice.get(i);
             }
             h *= 109;
             return h;
@@ -278,19 +345,15 @@ public class CalculateAverage_bytesfellow {
         private int hashcodeFast() {
             if (len == 0) {
                 return 0;
-            }
-            else if (len == 1) {
-                return inputSlice[startIdx] * 109;
-            }
-            else if (len == 2) {
-                return inputSlice[startIdx + 1] * 109 * 109 + inputSlice[startIdx];
-            }
-            else if (len == 3) {
-                return inputSlice[startIdx + 2] * 109 * 109 * 109 + inputSlice[startIdx + 1] * 109 * 109 + inputSlice[startIdx];
-            }
-            else {
-                return inputSlice[startIdx + 3] * 109 * 109 * 109 * 109 + inputSlice[startIdx + 2] * 109 * 109 * 109 + inputSlice[startIdx + 1] * 109 * 109
-                        + inputSlice[startIdx];
+            } else if (len == 1) {
+                return inputSlice.get(startIdx) * 109;
+            } else if (len == 2) {
+                return inputSlice.get(startIdx + 1) * 109 * 109 + inputSlice.get(startIdx);
+            } else if (len == 3) {
+                return inputSlice.get(startIdx + 2) * 109 * 109 * 109 + inputSlice.get(startIdx + 1) * 109 * 109 + inputSlice.get(startIdx);
+            } else {
+                return inputSlice.get(startIdx + 3) * 109 * 109 * 109 * 109 + inputSlice.get(startIdx + 2) * 109 * 109 * 109 + inputSlice.get(startIdx + 1) * 109 * 109
+                        + inputSlice.get(startIdx);
             }
         }
 
@@ -306,13 +369,10 @@ public class CalculateAverage_bytesfellow {
             if (len != station.len) {
                 return false;
             }
-            for (int i = 0; i < len; i++) {
-                if (inputSlice[startIdx + i] != station.inputSlice[station.startIdx + i]) {
-                    return false;
-                }
-            }
 
-            return true;
+            return (dontSLice ? inputSlice : inputSlice.slice(startIdx, len))
+                    .equals(station.dontSLice ? station.inputSlice : station.inputSlice.slice(station.startIdx, station.len));
+
         }
 
         @Override
@@ -326,9 +386,9 @@ public class CalculateAverage_bytesfellow {
         }
 
         public String materializeName() {
-            if (nameAsString == null) {
+            if (nameAsString == null && len >= 0) {
                 byte[] nameForMaterialization = new byte[len];
-                System.arraycopy(inputSlice, startIdx, nameForMaterialization, 0, len);
+                inputSlice.get(startIdx, nameForMaterialization, 0, len);
                 nameAsString = new String(nameForMaterialization, StandardCharsets.UTF_8);
             }
 
@@ -388,16 +448,16 @@ public class CalculateAverage_bytesfellow {
 
     }
 
-    private static long parseToLongIgnoringDecimalPoint(byte[] slice, int startIndex, int len) {
+    private static long parseToLongIgnoringDecimalPoint(ByteBuffer slice, int startIndex, int len) {
         long value = 0;
 
         int start = startIndex;
-        if (slice[startIndex] == '-') {
+        if (slice.get(startIndex) == '-') {
             start = startIndex + 1;
         }
 
         for (int i = start; i < startIndex + len; i++) {
-            if (slice[i] == '.') {
+            if (slice.get(i) == '.') {
                 continue;
             }
 
@@ -414,18 +474,17 @@ public class CalculateAverage_bytesfellow {
         return (value << 3) + (value << 1);
     }
 
-    private static long digitAsLong(byte[] digits, int position) {
-        return (digits[position] - 48);
+    private static long digitAsLong(ByteBuffer digits, int position) {
+        return (digits.get(position) - 48);
     }
 
     public static void main(String[] args) throws IOException {
 
         Partitioner partitioner = new Partitioner(PartitionsNumber);
 
-        try (FileInputStream fileInputStream = new FileInputStream(FILE)) {
-            parseStreamWithBytes(fileInputStream, InputStreamReadBufferLen, partitioner::processSlice);
-        }
-        catch (Exception e) {
+        try (FileChannel fc = FileChannel.open(Paths.get(FILE), StandardOpenOption.READ)) {
+            parseStreamWithBytes(fc, InputStreamReadBufferLen, partitioner::processSlice);
+        } catch (Exception e) {
             throw new RuntimeException(e);
         }
 
@@ -433,65 +492,79 @@ public class CalculateAverage_bytesfellow {
 
     }
 
-    static void parseStreamWithBytes(InputStream inputStream, int bufferLen, Consumer<byte[]> sliceConsumer) throws IOException {
+    static void parseStreamWithBytes(FileChannel inputStream, int bufferLen, Consumer<ByteBuffer> sliceConsumer) throws IOException {
 
-        byte[] byteArray = new byte[bufferLen];
-        int offset = 0;
+        // byte[] byteArray = new byte[bufferLen];
         int lenToRead = bufferLen;
 
         int readLen;
 
-        while ((readLen = inputStream.read(byteArray, offset, lenToRead)) > -1) {
+        ByteBuffer buffer = ByteBuffer.allocate(bufferLen);
+        byte[] tail = null;
+
+        while ((readLen = inputStream.read(buffer)) > -1) {
             if (readLen == 0) {
                 continue;
             }
 
-            int traverseLen = Math.min(offset + readLen, bufferLen);
-            int lastLineBreakInSlicePosition = traverseLen;
+            if (tail != null) {
+                buffer = ByteBuffer
+                        .allocate(tail.length + buffer.limit())
+                        .put(0, tail, 0, tail.length)
+                        .put(tail.length, buffer, 0, buffer.limit());
+            }
+
+            int traverseLen = buffer.limit(); // Math.min(readLen, bufferLen);
+            int positionAfterLastLineBreak = traverseLen;
 
             for (int j = traverseLen - 1; j >= 0; j--) {
-                if (byteArray[j] == '\n') {
-                    lastLineBreakInSlicePosition = j + 1;
+                if (buffer.get(j) == '\n') {
+                    positionAfterLastLineBreak = j + 1;
                     break;
                 }
             }
 
-            if (lastLineBreakInSlicePosition == traverseLen) {
-                // todo: end of line was not found in a slice?
-            }
+            int sliceSize = traverseLen / SchedulerPoolSize; // todo:
 
-            int sliceSize = lastLineBreakInSlicePosition / SchedulerPoolSize;
+            int currentSliceStart = 0;
 
-            int s = 0;
+            int currentSliceEnd = Math.min(sliceSize, positionAfterLastLineBreak - 1);
 
-            int j = Math.min(sliceSize, lastLineBreakInSlicePosition - 1);
-            while (s < lastLineBreakInSlicePosition && j < lastLineBreakInSlicePosition) {
-                if (byteArray[j] == '\n') {
-                    int len = j - s;
-                    byte[] slice = new byte[len];
-                    System.arraycopy(byteArray, s, slice, 0, len);
+            while (currentSliceStart < positionAfterLastLineBreak && currentSliceEnd < positionAfterLastLineBreak) {
+                if (buffer.get(currentSliceEnd) == '\n') {
+                    int sliceLen = currentSliceEnd - currentSliceStart + 1;
+                    ByteBuffer slice = buffer.slice(currentSliceStart, sliceLen);
+                    // var tmp = new byte[sliceLen];
+                    // slice.get(0, tmp, 0, sliceLen);
+
+                    // System.out.println("|" + new String(tmp, StandardCharsets.UTF_8) + "|");
+
                     sliceConsumer.accept(slice);
 
-                    s = j + 1;
-                    j = Math.min(s + sliceSize, lastLineBreakInSlicePosition - 1);
+                    currentSliceStart = currentSliceEnd + 1;
+                    currentSliceEnd = Math.min(currentSliceStart + sliceSize, positionAfterLastLineBreak - 1);
 
+                } else {
+                    currentSliceEnd++;
                 }
-                else {
-                    j++;
-                }
+
             }
 
-            if (s < traverseLen && lastLineBreakInSlicePosition < traverseLen) {
+            if (currentSliceStart < traverseLen && positionAfterLastLineBreak < traverseLen) {
                 // some tail left, carry it over to the next read
-                int len = traverseLen - s;
-                System.arraycopy(byteArray, s, byteArray, 0, len);
-                offset = len;
+                int len = traverseLen - currentSliceStart;
+
+                tail = new byte[len];
+                buffer.get(currentSliceStart, tail, 0, len);
+
                 lenToRead = bufferLen - len;
-            }
-            else {
-                offset = 0;
+            } else {
+                // offset = 0;
                 lenToRead = bufferLen;
+                tail = null;
             }
+            // buffer.clear();
+            buffer = ByteBuffer.allocate(bufferLen);
         }
     }
 
@@ -499,14 +572,11 @@ public class CalculateAverage_bytesfellow {
         int masked = firstByteOfChar & 0b11111000;
         if (masked == 0b11110000) {
             return 4;
-        }
-        else if (masked == 0b11100000) {
+        } else if (masked == 0b11100000) {
             return 3;
-        }
-        else if (masked == 0b11000000) {
+        } else if (masked == 0b11000000) {
             return 2;
-        }
-        else {
+        } else {
             return 1;
         }
     }
@@ -527,8 +597,7 @@ public class CalculateAverage_bytesfellow {
 
                 SortedMap<Station, MeasurementAggregator> result = partitioner.getAllResults();
                 System.out.println(result); // output aggregated measurements according to the requirement
-            }
-            catch (Exception e) {
+            } catch (Exception e) {
                 System.out.println(e);
             }
             c.countDown();
@@ -536,33 +605,33 @@ public class CalculateAverage_bytesfellow {
 
         try {
             c.await();
-        }
-        catch (InterruptedException e) {
+        } catch (InterruptedException e) {
             throw new RuntimeException(e);
         }
 
     }
 
-    private static Measurement getMeasurement(byte[] slice, LineParams lineParams) {
+    private static Measurement getMeasurement(ByteBuffer slice, LineParams lineParams) {
         int idx = lastIndexOfSeparator(slice, lineParams);
         return new Measurement(
                 new Station(slice, lineParams.start, idx - lineParams.start),
                 parseToLongIgnoringDecimalPoint(slice, idx + 1, lineParams.start + lineParams.length - (idx + 1)));
     }
 
-    private static int lastIndexOfSeparator(byte[] slice, LineParams lineParams) {
+    private static int lastIndexOfSeparator(ByteBuffer slice, LineParams lineParams) {
         // hacky - we know that from the end of the line we have only
         // single byte characters
         // -2 is also hacky since we expect a particular format at the end of the line
 
-        int lastIdx = lineParams.start + lineParams.length() - 1;
-        if (slice[lastIdx - 3] == Separator) {
+        int lastIdx = lineParams.start + lineParams.length - 1;
+
+        if (slice.get(lastIdx - 2) == Separator) {
+            return lastIdx - 2;
+        } else if (slice.get(lastIdx - 3) == Separator) {
             return lastIdx - 3;
-        }
-        else if (slice[lastIdx - 4] == Separator) {
+        } else if (slice.get(lastIdx - 4) == Separator) {
             return lastIdx - 4;
-        }
-        else if (slice[lastIdx - 5] == Separator) {
+        } else if (slice.get(lastIdx - 5) == Separator) {
             return lastIdx - 5;
         }
 
