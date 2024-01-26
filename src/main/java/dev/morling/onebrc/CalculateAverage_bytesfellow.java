@@ -253,7 +253,8 @@ public class CalculateAverage_bytesfellow {
             this.inputSlice = inputSlice;
             this.startIdx = startIdx;
             this.len = len;
-            this.hash = hashcodeFast();
+            this.hash = hashcodeFastBytes();
+
         }
 
         public Station(Station from) {
@@ -292,6 +293,18 @@ public class CalculateAverage_bytesfellow {
                 return inputSlice[startIdx + 3] * 109 * 109 * 109 * 109 + inputSlice[startIdx + 2] * 109 * 109 * 109 + inputSlice[startIdx + 1] * 109 * 109
                         + inputSlice[startIdx];
             }
+        }
+
+        private int hashcodeFastBytes() {
+            if (len == 0) {
+                return 0;
+            }
+
+            return inputSlice[startIdx] & 0xff |
+                    (inputSlice[startIdx + 1] & 0xff) << 8 |
+                    (inputSlice[startIdx + 2] & 0xff) << 16 |
+                    (inputSlice[startIdx + 3] & 0xff) << 24;
+
         }
 
         @Override
