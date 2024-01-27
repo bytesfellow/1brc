@@ -48,18 +48,21 @@ public class CalculateAverage_bytesfellow {
     static class SimplifiedMap<K, V> implements Map<K, V> {
 
         private int bucketsNumber;
-        private ArrayList<List<Map.Entry<K, V>>> buckets;
+        private Object[] buckets;
 
         public SimplifiedMap(int bucketsNumber) {
             this.bucketsNumber = bucketsNumber;
-            buckets = new ArrayList<>(bucketsNumber);
-            IntStream.range(0, bucketsNumber).forEach((i) -> buckets.add(new ArrayList<>()));
-            this.buckets.ensureCapacity(bucketsNumber);
+            buckets = new Object[bucketsNumber];
+            IntStream.range(0, bucketsNumber).forEach((i) -> buckets[i] = new ArrayList<>());
         }
 
         @Override
         public int size() {
-            return buckets.stream().mapToInt(List::size).sum();
+            int size = 0;
+            for (Object o : buckets) {
+                size += ((List<?>) o).size();
+            }
+            return size;
         }
 
         @Override
@@ -105,7 +108,8 @@ public class CalculateAverage_bytesfellow {
 
         @Override
         public Set<K> keySet() {
-            return buckets.stream().flatMap((b) -> b.stream().map(Entry::getKey)).collect(Collectors.toSet());
+
+            return Arrays.stream(buckets).flatMap((b) -> ((List<Map.Entry<K, V>>) b).stream().map(Entry::getKey)).collect(Collectors.toSet());
         }
 
         @Override
@@ -115,7 +119,7 @@ public class CalculateAverage_bytesfellow {
 
         @Override
         public Set<Entry<K, V>> entrySet() {
-            return buckets.stream().flatMap(Collection::stream).collect(Collectors.toSet());
+            return Arrays.stream(buckets).flatMap((b) -> ((List<Map.Entry<K, V>>) b).stream()).collect(Collectors.toSet());
         }
 
         @Override
@@ -129,15 +133,14 @@ public class CalculateAverage_bytesfellow {
         }
 
         private int getBucket(Object key) {
-            int abs = Math.abs(key.hashCode() % bucketsNumber);
-            return abs;
+            return Math.abs(key.hashCode() % bucketsNumber);
         }
 
         private Map.Entry<K, V> findNode(Object key) {
             if (key == null)
                 return null;
 
-            var bucket = buckets.get(getBucket(key));
+            var bucket = (List<Map.Entry<K, V>>) buckets[getBucket(key)];
             for (Map.Entry<K, V> e : bucket) {
                 if (e.getKey().equals(key))
                     return e;
@@ -150,7 +153,7 @@ public class CalculateAverage_bytesfellow {
             if (key == null)
                 return null;
 
-            var bucket = buckets.get(getBucket(key));
+            var bucket = (List<Map.Entry<K, V>>) buckets[getBucket(key)];
             for (Map.Entry<K, V> e : bucket) {
                 if (e.getKey().equals(key)) {
                     V oldValue = e.getValue();
@@ -168,7 +171,7 @@ public class CalculateAverage_bytesfellow {
     static class Partition {
 
         private static final AtomicInteger cntr = new AtomicInteger(-1);
-        private final Map<Station, MeasurementAggregator> partitionResult = new SimplifiedMap<>(10000); // as per requirement we have not more than 10K keys
+        private final Map<Station, MeasurementAggregator> partitionResult = new SimplifiedMap<>(1000000); // as per requirement we have not more than 10K keys
         private final AtomicInteger leftToExecute = new AtomicInteger(0);
 
         private final String name = "partition-" + cntr.incrementAndGet();
@@ -371,19 +374,11 @@ public class CalculateAverage_bytesfellow {
 
         private volatile String nameAsString;
 
-        private final long[] compacted;
-
         public Station(byte[] inputSlice, int startIdx, int len) {
             this.inputSlice = inputSlice;
             this.startIdx = startIdx;
             this.len = len;
-            compacted = new long[len / 8 + (len % 8 != 0 ? 1 : 0)];
-
-            for (int i = 0, idx = 0; i < len; i += 8, idx++) {
-                compacted[idx] = getAnLong(i, ((i + 8) > len ? (len - i) : 0));
-            }
-
-            this.hash = len == 0 ? 0 : (int) compacted[0];// hashcodeFastBytes();
+            this.hash = hashcodeFastBytes();
 
         }
 
@@ -393,8 +388,6 @@ public class CalculateAverage_bytesfellow {
             this.startIdx = 0;
             this.len = from.len;
             this.hash = from.hash;
-
-            compacted = from.compacted;
         }
 
         private int hashCode109() {
@@ -482,17 +475,11 @@ public class CalculateAverage_bytesfellow {
                 return false;
             }
 
-            for (int i = 0; i < compacted.length; i++) {
-                if (compacted[i] != station.compacted[i]) {
+            for (int i = 0; i < len; i++) {
+                if ((inputSlice[startIdx + i] ^ station.inputSlice[station.startIdx + i]) != 0) {
                     return false;
                 }
             }
-
-            // for (int i = 0; i < len; i++) {
-            // if ((inputSlice[startIdx + i] ^ station.inputSlice[station.startIdx + i]) != 0) {
-            // return false;
-            // }
-            // }
 
             return true;
         }
