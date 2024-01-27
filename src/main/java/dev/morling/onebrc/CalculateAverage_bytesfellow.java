@@ -23,6 +23,8 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 public class CalculateAverage_bytesfellow {
@@ -43,10 +45,130 @@ public class CalculateAverage_bytesfellow {
     private static final int InputStreamBlockSize = 4096;
     private static final int InputStreamReadBufferLen = 250 * InputStreamBlockSize;
 
+    static class SimplifiedMap<K, V> implements Map<K, V> {
+
+        private int bucketsNumber;
+        private ArrayList<List<Map.Entry<K, V>>> buckets;
+
+        public SimplifiedMap(int bucketsNumber) {
+            this.bucketsNumber = bucketsNumber;
+            buckets = new ArrayList<>(bucketsNumber);
+            IntStream.range(0, bucketsNumber).forEach((i) -> buckets.add(new ArrayList<>()));
+            this.buckets.ensureCapacity(bucketsNumber);
+        }
+
+        @Override
+        public int size() {
+            return buckets.stream().mapToInt(List::size).sum();
+        }
+
+        @Override
+        public boolean isEmpty() {
+            return size() == 0;
+        }
+
+        @Override
+        public boolean containsKey(Object key) {
+            return findNode(key) != null;
+        }
+
+        @Override
+        public boolean containsValue(Object value) {
+            return false;
+        }
+
+        @Override
+        public V get(Object key) {
+            Entry<K, V> node = findNode(key);
+            return node != null ? node.getValue() : null;
+        }
+
+        @Override
+        public V put(K key, V value) {
+            return putNode(key, value);
+        }
+
+        @Override
+        public V remove(Object key) {
+            return null;
+        }
+
+        @Override
+        public void putAll(Map<? extends K, ? extends V> m) {
+
+        }
+
+        @Override
+        public void clear() {
+
+        }
+
+        @Override
+        public Set<K> keySet() {
+            return buckets.stream().flatMap((b) -> b.stream().map(Entry::getKey)).collect(Collectors.toSet());
+        }
+
+        @Override
+        public Collection<V> values() {
+            return null;
+        }
+
+        @Override
+        public Set<Entry<K, V>> entrySet() {
+            return buckets.stream().flatMap(Collection::stream).collect(Collectors.toSet());
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            return false;
+        }
+
+        @Override
+        public int hashCode() {
+            return 0;
+        }
+
+        private int getBucket(Object key) {
+            int abs = Math.abs(key.hashCode() % bucketsNumber);
+            return abs;
+        }
+
+        private Map.Entry<K, V> findNode(Object key) {
+            if (key == null)
+                return null;
+
+            var bucket = buckets.get(getBucket(key));
+            for (Map.Entry<K, V> e : bucket) {
+                if (e.getKey().equals(key))
+                    return e;
+            }
+
+            return null;
+        }
+
+        private V putNode(Object key, V value) {
+            if (key == null)
+                return null;
+
+            var bucket = buckets.get(getBucket(key));
+            for (Map.Entry<K, V> e : bucket) {
+                if (e.getKey().equals(key)) {
+                    V oldValue = e.getValue();
+                    e.setValue(value);
+                    return oldValue;
+                }
+            }
+
+            bucket.add(new AbstractMap.SimpleEntry<>((K) key, value)); // unsafe
+            return null;
+        }
+
+    }
+
     static class Partition {
 
         private static final AtomicInteger cntr = new AtomicInteger(-1);
-        private final Map<Station, MeasurementAggregator> partitionResult = new HashMap<>(10000); // as per requirement we have not more than 10K keys
+        private final Map<Station, MeasurementAggregator> partitionResult = new SimplifiedMap<>(10000); // as per requirement we have not more than 10K keys
         private final AtomicInteger leftToExecute = new AtomicInteger(0);
 
         private final String name = "partition-" + cntr.incrementAndGet();
@@ -249,11 +371,19 @@ public class CalculateAverage_bytesfellow {
 
         private volatile String nameAsString;
 
+        private final long[] compacted;
+
         public Station(byte[] inputSlice, int startIdx, int len) {
             this.inputSlice = inputSlice;
             this.startIdx = startIdx;
             this.len = len;
-            this.hash = hashcodeFastBytes();
+            compacted = new long[len / 8 + (len % 8 != 0 ? 1 : 0)];
+
+            for (int i = 0, idx = 0; i < len; i += 8, idx++) {
+                compacted[idx] = getAnLong(i, ((i + 8) > len ? (len - i) : 0));
+            }
+
+            this.hash = len == 0 ? 0 : (int) compacted[0];// hashcodeFastBytes();
 
         }
 
@@ -263,6 +393,8 @@ public class CalculateAverage_bytesfellow {
             this.startIdx = 0;
             this.len = from.len;
             this.hash = from.hash;
+
+            compacted = from.compacted;
         }
 
         private int hashCode109() {
@@ -300,11 +432,41 @@ public class CalculateAverage_bytesfellow {
                 return 0;
             }
 
-            return inputSlice[startIdx] & 0xff |
-                    (inputSlice[startIdx + 1] & 0xff) << 8 |
-                    (inputSlice[startIdx + 2] & 0xff) << 16 |
-                    (inputSlice[startIdx + 3] & 0xff) << 24;
+            return getAnInt(0);
 
+        }
+
+        private int getAnInt(int idx) {
+            return inputSlice[startIdx + idx] & 0xff |
+                    (inputSlice[startIdx + idx + 1] & 0xff) << 8 |
+                    (inputSlice[startIdx + idx + 2] & 0xff) << 16 |
+                    (inputSlice[startIdx + idx + 3] & 0xff) << 24;
+        }
+
+        private long getAnLong(int idx, int maxIdx) {
+
+            if (maxIdx == 0) {
+
+                return inputSlice[startIdx + idx] & 0xffL |
+                        (inputSlice[startIdx + idx + 1] & 0xffL) << 8 |
+                        (inputSlice[startIdx + idx + 2] & 0xffL) << 16 |
+                        (inputSlice[startIdx + idx + 3] & 0xffL) << 24 |
+                        (inputSlice[startIdx + idx + 4] & 0xffL) << 32 |
+                        (inputSlice[startIdx + idx + 5] & 0xffL) << 40 |
+                        (inputSlice[startIdx + idx + 6] & 0xffL) << 48 |
+                        (inputSlice[startIdx + idx + 7] & 0xffL) << 56;
+
+            }
+            else {
+                return inputSlice[startIdx + idx] & 0xffL |
+                        (maxIdx >= 1 ? (inputSlice[startIdx + idx + 1] & 0xffL) << 8 : 0) |
+                        (maxIdx >= 2 ? (inputSlice[startIdx + idx + 2] & 0xffL) << 16 : 0) |
+                        (maxIdx >= 3 ? (inputSlice[startIdx + idx + 3] & 0xffL) << 24 : 0) |
+                        (maxIdx >= 4 ? (inputSlice[startIdx + idx + 4] & 0xffL) << 32 : 0) |
+                        (maxIdx >= 5 ? (inputSlice[startIdx + idx + 5] & 0xffL) << 40 : 0) |
+                        (maxIdx >= 6 ? (inputSlice[startIdx + idx + 6] & 0xffL) << 48 : 0) |
+                        (maxIdx >= 7 ? (inputSlice[startIdx + idx + 7] & 0xffL) << 56 : 0);
+            }
         }
 
         @Override
@@ -319,11 +481,18 @@ public class CalculateAverage_bytesfellow {
             if (len != station.len) {
                 return false;
             }
-            for (int i = 0; i < len; i++) {
-                if (inputSlice[startIdx + i] != station.inputSlice[station.startIdx + i]) {
+
+            for (int i = 0; i < compacted.length; i++) {
+                if (compacted[i] != station.compacted[i]) {
                     return false;
                 }
             }
+
+            // for (int i = 0; i < len; i++) {
+            // if ((inputSlice[startIdx + i] ^ station.inputSlice[station.startIdx + i]) != 0) {
+            // return false;
+            // }
+            // }
 
             return true;
         }
@@ -428,7 +597,7 @@ public class CalculateAverage_bytesfellow {
     }
 
     private static long digitAsLong(byte[] digits, int position) {
-        return (digits[position] - 48);
+        return 0xffL & (digits[position] - 48);
     }
 
     public static void main(String[] args) throws IOException {
