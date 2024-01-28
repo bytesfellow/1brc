@@ -162,7 +162,8 @@ public class CalculateAverage_bytesfellow {
 
             scheduler.execute(() -> {
                 List<List<LineParams>> partitionedLines = new ArrayList<>(partitionsSize());
-                IntStream.range(0, partitionsSize()).forEach((p) -> partitionedLines.add(new ArrayList<>(slice.length / 116 / 2))); // 116 is the max line len incl new line char
+                // allocate some capacity, assuming that on average lines are half of the max (407 bytes) length
+                IntStream.range(0, partitionsSize()).forEach((p) -> partitionedLines.add(new ArrayList<>(slice.length / 407 / 2)));
 
                 int start = 0;
                 int i = 0;
@@ -262,17 +263,6 @@ public class CalculateAverage_bytesfellow {
             this.startIdx = 0;
             this.len = from.len;
             this.hash = from.hash;
-        }
-
-        private int hashCode109() {
-            if (len == 0)
-                return 0;
-            int h = inputSlice[startIdx];
-            for (int i = startIdx + 1; i < startIdx + len; i++) {
-                h = (h << 7) + inputSlice[i];
-            }
-            h *= 109;
-            return h;
         }
 
         private int hashcodeFast() {
