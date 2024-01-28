@@ -296,13 +296,8 @@ public class CalculateAverage_bytesfellow {
             if (len != station.len) {
                 return false;
             }
-            for (int i = 0; i < len; i++) {
-                if (inputSlice[startIdx + i] != station.inputSlice[station.startIdx + i]) {
-                    return false;
-                }
-            }
 
-            return true;
+            return Arrays.equals(inputSlice, startIdx, startIdx + len, station.inputSlice, station.startIdx, station.startIdx + len);
         }
 
         @Override
